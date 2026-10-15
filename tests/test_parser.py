@@ -21,8 +21,9 @@ def test_relative_urls_resolved():
 
 def test_non_file_links_excluded():
     urls = {e.url for e in entries()}
-    assert "https://example.com/page.html" not in urls   # <a> 无扩展名 → 排除
-    assert "https://example.com/page/#top" not in urls   # 锚点排除
+    # 断言的是解析后的真实 URL（相对路径基于页面目录 /page/ 解析）
+    assert "https://example.com/page/page.html" not in urls        # <a> 无扩展名 → 排除
+    assert "https://example.com/page/index.html#top" not in urls   # 锚点排除
 
 
 def test_img_extensionless_kept_as_unknown():
