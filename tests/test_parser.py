@@ -54,3 +54,18 @@ def test_filename_dedup_suffix():
     names = [e.suggested_filename for e in entries()]
     assert "photo.jpg" in names
     assert "photo-1.jpg" in names  # other/photo.jpg 与 images/photo.jpg 重名
+
+
+def test_srcset_entries_extracted():
+    urls = {e.url for e in entries()}
+    assert "https://example.com/page/media/set-a.mp4" in urls
+    assert "https://example.com/page/media/set-b.mp4" in urls
+    assert "https://example.com/page/images/set-c.png" in urls
+    assert "https://example.com/page/images/set-d.png" in urls
+
+
+def test_filename_dedup_case_insensitive():
+    names = [e.suggested_filename for e in entries()]
+    assert "photo.jpg" in names       # images/photo.jpg (first)
+    assert "photo-1.jpg" in names     # other/photo.jpg
+    assert "Photo-2.JPG" in names     # other/Photo.JPG — 大小写不敏感判重（-1 槽位已被占用，保留原大小写）

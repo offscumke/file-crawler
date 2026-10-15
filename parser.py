@@ -24,7 +24,7 @@ class FileEntry:
 
 def detect_type(url: str) -> str | None:
     path = urlsplit(url).path.lower()
-    for ext in sorted(EXT_TO_TYPE, key=len, reverse=True):  # .tar.gz 先于 .gz 类后缀
+    for ext in sorted(EXT_TO_TYPE, key=len, reverse=True):  # 防御性排序：当前映射中没有任何扩展名是另一个的后缀，今天实为空操作
         if path.endswith(ext):
             return EXT_TO_TYPE[ext]
     return None
@@ -38,8 +38,10 @@ def parse_page(html: str, page_url: str) -> list[FileEntry]:
     soup = BeautifulSoup(html, "html.parser")
     candidates = []  # (raw_ref, from_media_tag)
     for tag in soup.find_all("img"):
-        if tag.get("src"):
-            candidates.append((tag["src"], True))
+        for ref in (tag.get("src", "") + " " + tag.get("srcset", "")).split(","):
+            ref = ref.split()[0] if ref.split() else ""
+            if ref:
+                candidates.append((ref, True))
     for tag in soup.find_all("source"):
         for ref in (tag.get("src", "") + " " + tag.get("srcset", "")).split(","):
             ref = ref.split()[0] if ref.split() else ""
@@ -74,9 +76,9 @@ def parse_page(html: str, page_url: str) -> list[FileEntry]:
             base, dot, ext = (raw_name or f"file-{i + 1}"), "", ""
         name = f"{base}{dot}{ext}"
         final, n = name, 1
-        while final in used_names:
+        while final.lower() in used_names:  # macOS/Windows 文件系统大小写不敏感，判重按小写；选定名保留原大小写
             final = f"{base}-{n}{dot}{ext}"
             n += 1
-        used_names.add(final)
+        used_names.add(final.lower())
         e.suggested_filename = final
     return entries
