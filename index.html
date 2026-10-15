@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文件爬虫</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --border: #e3e6eb; --text: #1f2430;
+    --muted: #6b7480; --accent: #2f6fed; --ok: #2e9b53; --fail: #d3453b;
+    --skip: #8a929c; --pending: #d9a227;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+          "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  .row { display: flex; gap: 8px; align-items: center; }
+  input[type=text] {
+    flex: 1; padding: 9px 11px; border: 1px solid var(--border);
+    border-radius: 7px; font: inherit; background: #fff; color: var(--text);
+  }
+  input[type=text]:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    padding: 9px 16px; border: 1px solid var(--border); border-radius: 7px;
+    background: #fff; color: var(--text); font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #f0f2f5; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #2a63d6; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.mini { padding: 4px 10px; font-size: 12px; }
+  .list-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .list-head h2 { font-size: 15px; margin: 0; flex: 1; }
+  .count { color: var(--muted); font-size: 12px; }
+  ul.files { list-style: none; margin: 0; padding: 0; }
+  ul.files li { display: flex; align-items: center; gap: 10px; padding: 6px 4px; border-top: 1px solid var(--border); }
+  ul.files li:first-child { border-top: none; }
+  ul.files input[type=checkbox] { width: 16px; height: 16px; margin: 0; flex: none; cursor: pointer; }
+  .fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .src { font-size: 12px; color: var(--accent); text-decoration: none; max-width: 220px;
+         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .src:hover { text-decoration: underline; }
+  .badge { flex: none; font-size: 11px; padding: 2px 8px; border-radius: 20px; background: #eef1f6; color: #4a5568; }
+  .badge.image { background: #e6efff; color: #2a5fc0; }
+  .badge.document { background: #f0e9fb; color: #6f42b8; }
+  .badge.asset { background: #fdf0e2; color: #a8661b; }
+  .empty { color: var(--muted); padding: 14px 4px; }
+  #msg { display: none; padding: 10px 12px; border-radius: 8px; margin-bottom: 16px;
+         background: #fff6e5; color: #8a5a12; border: 1px solid #f2dfb6; }
+  #msg.error { background: #fdeceb; color: #a5372f; border-color: #f3cfcb; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .st { font-size: 12px; padding: 2px 9px; border-radius: 20px; background: #eef1f6; color: #4a5568; }
+  .st.queued { background: #eef1f6; color: #5a6572; }
+  .st.downloading { background: #fbf1d6; color: #8a6410; }
+  .st.ok { background: #e2f4e8; color: #1f7a41; }
+  .st.failed { background: #fbded9; color: #a5372f; }
+  .st.skipped { background: #eceef1; color: #66707c; }
+  .err { color: var(--muted); font-size: 12px; }
+  .summary { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
+             display: flex; gap: 16px; flex-wrap: wrap; align-items: baseline; }
+  .summary b.ok { color: var(--ok); } .summary b.fail { color: var(--fail); } .summary b.skip { color: var(--skip); }
+  .dir { font-size: 12px; color: var(--muted); word-break: break-all; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .live { color: var(--accent); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>文件爬虫</h1>
+  <p class="sub">输入页面地址 → 解析出可下载文件 → 勾选后下载。同一时间只运行一个任务。</p>
+
+  <div class="card">
+    <div class="row">
+      <input type="text" id="url" placeholder="https://example.com/page" autocomplete="off">
+      <button class="primary" id="btn-parse">解析</button>
+    </div>
+  </div>
+
+  <div id="msg"></div>
+
+  <div class="card">
+    <div class="list-head">
+      <h2>文件列表</h2>
+      <span class="count" id="count"></span>
+      <button class="mini" id="btn-all">全选</button>
+      <button class="mini" id="btn-none">全不选</button>
+    </div>
+    <ul class="files" id="list"></ul>
+    <div class="empty" id="list-empty" style="display:none">未发现可下载文件</div>
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="btn-download" disabled>开始下载</button>
+      <span class="hint" id="picked-hint"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="list-head">
+      <h2>下载进度</h2>
+      <span class="live" id="live"></span>
+    </div>
+    <table>
+      <thead><tr><th>文件名</th><th>状态</th><th class="num">大小</th></tr></thead>
+      <tbody id="progress"><tr><td colspan="3" class="empty">暂无任务</td></tr></tbody>
+    </table>
+    <div class="summary" id="summary" style="display:none">
+      <span>汇总：成功 <b class="ok" id="s-ok">0</b>、失败 <b class="fail" id="s-fail">0</b>、跳过 <b class="skip" id="s-skip">0</b></span>
+      <span class="dir">保存目录：<span id="s-dir"></span></span>
+    </div>
+  </div>
+</div>
+
+<script>
+let files = [];      // 解析结果
+let pageUrl = '';    // 解析时的原始页面 URL
+let jobId = null;
+let checked = {};    // file.url -> true/false
+let pollTimer = null;
+let running = false;
+
+const $ = id => document.getElementById(id);
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(2) + ' MB';
+}
+
+function showMsg(text, kind) {
+  const el = $('msg');
+  if (!text) { el.style.display = 'none'; el.textContent = ''; return; }
+  el.className = kind === 'error' ? 'error' : '';
+  el.textContent = text;
+  el.style.display = 'block';
+}
+
+async function api(path, method, body) {
+  const opts = { method: method || 'GET', headers: {} };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { /* 非 JSON 响应体 */ }
+  if (!r.ok) {
+    const detail = data && (data.detail || data.message);
+    throw new Error(detail || `HTTP ${r.status}`);
+  }
+  return data;
+}
+
+// ---------- 解析 ----------
+async function parse() {
+  pageUrl = $('url').value.trim();
+  if (!pageUrl) { showMsg('请先输入页面 URL', 'error'); return; }
+  showMsg('');
+  $('btn-parse').disabled = true;
+  try {
+    const data = await api('/api/parse', 'POST', { url: pageUrl });
+    files = data.files || [];
+    renderList();
+  } catch (e) {
+    files = [];
+    renderList();
+    showMsg('解析失败：' + e.message, 'error');
+  } finally {
+    $('btn-parse').disabled = false;
+  }
+}
+
+function renderList() {
+  const list = $('list');
+  list.innerHTML = '';
+  checked = {};
+  files.forEach(f => { checked[f.url] = true; });   // 默认全选
+  $('list-empty').style.display = files.length ? 'none' : 'block';
+  $('count').textContent = files.length ? `共 ${files.length} 项` : '';
+
+  files.forEach(f => {
+    const li = document.createElement('li');
+    li.innerHTML =
+      `<input type="checkbox" data-url="${esc(f.url)}" ${checked[f.url] ? 'checked' : ''}>` +
+      `<span class="fname" title="${esc(f.url)}">${esc(f.suggested_filename)}</span>` +
+      `<span class="badge ${esc(f.file_type)}">${esc(f.file_type)}</span>` +
+      `<a class="src" href="${esc(f.url)}" target="_blank" rel="noopener">来源</a>`;
+    list.appendChild(li);
+  });
+
+  list.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => { checked[cb.dataset.url] = cb.checked; updatePicked(); });
+  });
+  updatePicked();
+}
+
+function pickedFiles() { return files.filter(f => checked[f.url]); }
+
+function updatePicked() {
+  const n = pickedFiles().length;
+  $('picked-hint').textContent = files.length ? `已勾选 ${n} / ${files.length} 项` : '';
+  $('btn-download').disabled = running || files.length === 0 || n === 0;
+}
+
+function setAll(v) {
+  files.forEach(f => { checked[f.url] = v; });
+  $('list').querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = checked[cb.dataset.url]; });
+  updatePicked();
+}
+
+// ---------- 下载 ----------
+async function startDownload() {
+  const picked = pickedFiles();
+  if (!picked.length) { showMsg('没有勾选任何文件', 'error'); return; }
+  showMsg('');
+  $('btn-download').disabled = true;
+  try {
+    const data = await api('/api/jobs', 'POST', { url: pageUrl, files: picked });
+    jobId = data.job_id;
+    running = true;
+    updatePicked();
+    $('live').textContent = '轮询中…';
+    $('summary').style.display = 'none';
+    poll();
+  } catch (e) {
+    // 409（已有任务在运行）与 400（没有勾选）都直接显示服务端消息
+    showMsg(e.message, 'error');
+    updatePicked();
+  }
+}
+
+function stopPolling() {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  running = false;
+  $('live').textContent = '';
+  updatePicked();
+}
+
+async function poll() {
+  if (!jobId) return;
+  let data;
+  try {
+    data = await api('/api/jobs/' + encodeURIComponent(jobId));
+  } catch (e) {
+    stopPolling();
+    showMsg(e.message, 'error');   // 404 → 「任务不存在（服务可能已重启）」
+    return;
+  }
+  renderProgress(data);
+  const s = data.summary;
+  const terminal = (s.done === s.total) || data.status === 'done' || data.status === 'failed';
+  if (terminal) {          // 停止轮询并显示汇总
+    stopPolling();
+    $('summary').style.display = 'flex';
+  } else {
+    pollTimer = setTimeout(poll, 1000);
+  }
+}
+
+function renderProgress(data) {
+  const tbody = $('progress');
+  tbody.innerHTML = '';
+  (data.files || []).forEach(f => {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${esc(f.filename)}${f.error ? `<div class="err">${esc(f.error)}</div>` : ''}</td>` +
+      `<td><span class="st ${esc(f.status)}">${esc(f.status)}</span></td>` +
+      `<td class="num">${fmtBytes(f.bytes)}</td>`;
+    tbody.appendChild(tr);
+  });
+  const s = data.summary;
+  $('s-ok').textContent = s.ok;
+  $('s-fail').textContent = s.failed;
+  $('s-skip').textContent = s.skipped;
+  $('s-dir').textContent = data.run_dir || '';
+}
+
+// ---------- 事件绑定 ----------
+$('btn-parse').addEventListener('click', parse);
+$('btn-all').addEventListener('click', () => setAll(true));
+$('btn-none').addEventListener('click', () => setAll(false));
+$('btn-download').addEventListener('click', startDownload);
+$('url').addEventListener('keydown', e => { if (e.key === 'Enter') parse(); });
+</script>
+</body>
+</html>
