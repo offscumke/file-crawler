@@ -4,6 +4,7 @@ from pathlib import Path
 
 import store  # downloader.py 在 Task 4 才存在，本测试用 duck-typing 传入等价对象
 
+
 def make_result(**kw):
     defaults = dict(filename="a.jpg", source_url="https://e.com/a.jpg",
                     status="ok", bytes=10, error="")
