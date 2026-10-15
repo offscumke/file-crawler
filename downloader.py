@@ -42,9 +42,17 @@ async def download_files(entries, dest_dir, client=None, on_event=None):
         client = httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True)
     try:
         results = await asyncio.gather(
-            *[_download_one(entry, dest_dir, client, semaphore, on_event) for entry in entries]
+            *[_download_one(entry, dest_dir, client, semaphore, on_event) for entry in entries],
+            return_exceptions=True,
         )
-        return list(results)
+        # 安全网：任何漏网异常都转成失败结果，绝不取消兄弟下载
+        out = []
+        for entry, res in zip(entries, results):
+            if isinstance(res, BaseException):
+                out.append(DownloadResult(entry.suggested_filename, entry.url, "failed", 0, str(res)))
+            else:
+                out.append(res)
+        return out
     finally:
         if own_client:
             await client.aclose()
@@ -56,8 +64,8 @@ async def _download_one(entry, dest_dir, client, semaphore, on_event) -> Downloa
             on_event(entry, status)
 
     emit("queued")
-    filename = entry.suggested_filename
     for attempt in range(MAX_ATTEMPTS):
+        filename = entry.suggested_filename  # 每次尝试重置，重试不累加扩展名
         async with semaphore:
             emit("downloading")
             try:
@@ -74,7 +82,7 @@ async def _download_one(entry, dest_dir, client, semaphore, on_event) -> Downloa
                     chunks = []
                     async for chunk in resp.aiter_bytes():
                         chunks.append(chunk)
-            except (httpx.HTTPError, RuntimeError) as exc:
+            except (httpx.HTTPError, RuntimeError, OSError, ValueError) as exc:
                 if attempt == MAX_ATTEMPTS - 1:
                     emit("failed")
                     return DownloadResult(filename, entry.url, "failed", 0, str(exc))

@@ -33,6 +33,8 @@ def make_client():
             return httpx.Response(200, content=CONTENT, headers={"content-type": "image/png"})
         if url == "https://e.com/noext-unknown":
             return httpx.Response(200, content=CONTENT, headers={"content-type": "application/octet-stream"})
+        if url in ("https://e.com/ok1.jpg", "https://e.com/nullbyte"):
+            return httpx.Response(200, content=CONTENT)
         return httpx.Response(404)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -86,3 +88,56 @@ def test_unclassifiable_skipped(tmp_path, monkeypatch):
     _, events = run_download(make_entries(), tmp_path)
     assert ("https://e.com/noext-unknown", "skipped") in events
     assert not (tmp_path / "noext-unknown").exists()
+
+
+# --- 缺陷 1：重试后扩展名累加（y.png.png） ---
+
+class ReadErrorStream(httpx.AsyncByteStream):
+    """流式响应：迭代中途抛 ReadError，模拟传输在 body 阶段断开。"""
+
+    async def __aiter__(self):
+        raise httpx.ReadError("connection reset")
+        yield  # pragma: no cover
+
+
+def make_midbody_fail_then_ok_client():
+    calls = {"n": 0}
+
+    def handler(request):
+        url = str(request.url)
+        if url == "https://e.com/y":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(200, headers={"content-type": "image/png"},
+                                      stream=ReadErrorStream())
+            return httpx.Response(200, content=CONTENT, headers={"content-type": "image/png"})
+        return httpx.Response(404)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def test_retry_after_midbody_failure_keeps_single_extension(tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader.asyncio, "sleep", nosleep)
+    events = []
+    asyncio.run(downloader.download_files(
+        [FileEntry("https://e.com/y", "y", "unknown")], tmp_path,
+        make_midbody_fail_then_ok_client(), on_event=lambda e, s: events.append((e.url, s))))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["y.png"]
+    assert (tmp_path / "y.png").read_bytes() == CONTENT
+
+
+# --- 缺陷 2：写盘异常（嵌入 null 的文件名）不得取消兄弟下载 ---
+
+def test_write_error_does_not_cancel_siblings(tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader.asyncio, "sleep", nosleep)
+    entries = [
+        FileEntry("https://e.com/ok1.jpg", "ok1.jpg", "image"),
+        FileEntry("https://e.com/nullbyte", "\x00bad", "image"),
+    ]
+    events = []
+    results = asyncio.run(downloader.download_files(
+        entries, tmp_path, make_client(), on_event=lambda e, s: events.append((e.url, s))))
+    by_url = {r.source_url: r for r in results}
+    assert by_url["https://e.com/ok1.jpg"].status == "ok"
+    assert (tmp_path / "ok1.jpg").read_bytes() == CONTENT
+    assert by_url["https://e.com/nullbyte"].status == "failed"
