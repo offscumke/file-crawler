@@ -151,6 +151,17 @@ def test_parse_non_200_returns_502(client):
     assert r.status_code == 502
 
 
+def test_parse_transport_error_returns_502(client):
+    """传输层失败（连接被拒/DNS 之类）也必须映射为干净的 502，而不是未处理异常 → 500。"""
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    app.app.state.http_client = make_client(handler)
+    r = client.post("/api/parse", json={"url": PAGE_URL})
+    assert r.status_code == 502
+    assert "页面抓取失败" in r.json()["detail"]
+
+
 def test_mixed_outcome_job(client):
     """一个 ok、一个 404 失败（约 3s 退避）、一个 unknown 且 content-type 无法归类（跳过）。"""
     def handler(request):

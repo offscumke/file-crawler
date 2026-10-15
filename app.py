@@ -26,7 +26,10 @@ class JobRequest(BaseModel):
 
 
 async def fetch_page(client: httpx.AsyncClient, url: str) -> str:
-    resp = await client.get(url)
+    try:
+        resp = await client.get(url)
+    except httpx.HTTPError as exc:  # httpx 自有异常全部派生自 HTTPError：连接/超时/读取等传输层失败，干净报错而不是冒泡成 500
+        raise HTTPException(502, f"页面抓取失败: {type(exc).__name__}")
     if resp.status_code != 200:
         raise HTTPException(502, f"页面抓取失败: HTTP {resp.status_code}")
     return resp.text
