@@ -3,8 +3,6 @@ from dataclasses import dataclass
 
 import httpx
 
-from parser import FileEntry
-
 CONCURRENCY = 8
 TIMEOUT = 30.0
 MAX_ATTEMPTS = 3
@@ -35,7 +33,11 @@ class DownloadResult:
 
 
 async def download_files(entries, dest_dir, client=None, on_event=None):
-    """并发下载。on_event(entry, status) 在状态变化时回调（downloading/ok/failed/skipped）。"""
+    """并发下载。on_event(entry, status) 在状态变化时回调（downloading/ok/failed/skipped）。
+
+    on_event 必须是同步回调（async 回调会被静默丢弃）；downloading 每次尝试都会触发一次。
+    """
+    entries = list(entries)  # 生成器只能迭代一次：先物化，gather 与 zip 共用同一份
     semaphore = asyncio.Semaphore(CONCURRENCY)
     own_client = client is None
     if own_client:
@@ -64,9 +66,11 @@ async def _download_one(entry, dest_dir, client, semaphore, on_event) -> Downloa
             on_event(entry, status)
 
     emit("queued")
+    filename = entry.suggested_filename  # 循环前初始化：兜底 tail 不再潜在 NameError
     for attempt in range(MAX_ATTEMPTS):
         filename = entry.suggested_filename  # 每次尝试重置，重试不累加扩展名
-        async with semaphore:
+        backoff = None
+        async with semaphore:  # 信号量覆盖「网络 + 写盘」整次尝试
             emit("downloading")
             try:
                 async with client.stream("GET", entry.url) as resp:
@@ -82,15 +86,17 @@ async def _download_one(entry, dest_dir, client, semaphore, on_event) -> Downloa
                     chunks = []
                     async for chunk in resp.aiter_bytes():
                         chunks.append(chunk)
+                data = b"".join(chunks)
+                # 先缓冲全部字节再一次性写盘：失败时不会留下半截文件
+                (dest_dir / filename).write_bytes(data)
+                emit("ok")
+                return DownloadResult(filename, entry.url, "ok", len(data), "")
             except (httpx.HTTPError, RuntimeError, OSError, ValueError) as exc:
                 if attempt == MAX_ATTEMPTS - 1:
                     emit("failed")
                     return DownloadResult(filename, entry.url, "failed", 0, str(exc))
-                await asyncio.sleep(BACKOFF_SECONDS[attempt])
-                continue
-        data = b"".join(chunks)
-        (dest_dir / filename).write_bytes(data)
-        emit("ok")
-        return DownloadResult(filename, entry.url, "ok", len(data), "")
+                backoff = BACKOFF_SECONDS[attempt]
+        if backoff is not None:  # 退避睡眠在信号量之外，不占着槽位干等
+            await asyncio.sleep(backoff)
     emit("failed")
     return DownloadResult(filename, entry.url, "failed", 0, "retries exhausted")

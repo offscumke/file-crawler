@@ -1,9 +1,6 @@
 import asyncio
-from dataclasses import dataclass
-from pathlib import Path
 
 import httpx
-import pytest
 
 import downloader
 from parser import FileEntry
@@ -141,3 +138,72 @@ def test_write_error_does_not_cancel_siblings(tmp_path, monkeypatch):
     assert by_url["https://e.com/ok1.jpg"].status == "ok"
     assert (tmp_path / "ok1.jpg").read_bytes() == CONTENT
     assert by_url["https://e.com/nullbyte"].status == "failed"
+    # I1：写盘失败也必须走正常重试路径（3 次尝试）并触发终止事件
+    nb_events = [s for (u, s) in events if u == "https://e.com/nullbyte"]
+    assert nb_events[-1] == "failed"
+    assert nb_events.count("downloading") == 3
+
+
+# --- C1：生成器输入不得静默丢失结果 ---
+
+def gen_entries():
+    for e in make_entries():
+        yield e
+
+
+def test_generator_input_returns_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader.asyncio, "sleep", nosleep)
+    events = []
+    results = asyncio.run(downloader.download_files(
+        gen_entries(), tmp_path, make_client(), on_event=lambda e, s: events.append((e.url, s))))
+    by_url = {r.source_url: r for r in results}
+    assert len(results) == 5
+    assert by_url["https://e.com/a.jpg"].status == "ok"
+    assert by_url["https://e.com/fail-twice.jpg"].status == "ok"
+    assert by_url["https://e.com/always-500.jpg"].status == "failed"
+    assert by_url["https://e.com/noext"].filename == "noext.png"
+    assert by_url["https://e.com/noext"].status == "ok"
+    assert by_url["https://e.com/noext-unknown"].status == "skipped"
+    assert (tmp_path / "a.jpg").read_bytes() == CONTENT
+
+
+# --- I6：headline features ---
+
+def test_concurrency_cap(tmp_path):
+    state = {"inflight": 0, "max": 0}
+
+    async def handler(request):
+        state["inflight"] += 1
+        state["max"] = max(state["max"], state["inflight"])
+        await asyncio.sleep(0.01)  # 人为延迟，制造可观测的并发窗口
+        state["inflight"] -= 1
+        return httpx.Response(200, content=CONTENT)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    entries = [FileEntry(f"https://e.com/c{i}.jpg", f"c{i}.jpg", "image") for i in range(20)]
+    results = asyncio.run(downloader.download_files(entries, tmp_path, client))
+    assert state["max"] == 8  # == downloader.CONCURRENCY
+    assert state["max"] > 1   # 测试本身有效：确实观测到了并发
+    assert len(results) == 20
+    assert all(r.status == "ok" for r in results)
+
+
+def test_backoff_schedule(tmp_path, monkeypatch):
+    sleeps = []
+
+    async def rec(s):
+        sleeps.append(s)
+
+    monkeypatch.setattr(downloader.asyncio, "sleep", rec)
+    results = asyncio.run(downloader.download_files(
+        [FileEntry("https://e.com/always-500.jpg", "always-500.jpg", "image")], tmp_path, make_client()))
+    assert sleeps == [1, 2]  # 第三次失败直接终止，不再睡眠
+    assert results[0].status == "failed"
+
+
+def test_result_bytes_matches_content_length(tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader.asyncio, "sleep", nosleep)
+    results = asyncio.run(downloader.download_files(
+        [FileEntry("https://e.com/a.jpg", "a.jpg", "image")], tmp_path, make_client()))
+    assert results[0].status == "ok"
+    assert results[0].bytes == len(CONTENT)  # 喂给 manifest 的字节数
