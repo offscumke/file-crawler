@@ -61,7 +61,7 @@ async def api_create_job(req: JobRequest, request: Request):
         raise HTTPException(400, "没有勾选任何文件")
     job_id = uuid.uuid4().hex[:12]
     domain = httpx.URL(req.url).host.replace(":", "-")
-    run_dir = store.create_run_dir(RUNS_DIR, domain)
+    run_dir = store.create_run_dir(RUNS_DIR, f"{domain}-{job_id[:6]}")  # 带 job_id 短前缀：时间戳只到秒
     job = {"status": "running", "files": {}, "run_dir": str(run_dir), "task": None}
     for f in req.files:
         job["files"][f["url"]] = {"filename": f["suggested_filename"], "status": "queued",
@@ -72,28 +72,32 @@ async def api_create_job(req: JobRequest, request: Request):
         job["files"][entry.url]["status"] = status  # 只更新状态；bytes/error 由 run_job 结束后按 results 回填
 
     async def run_job():
-        entries = [parser_mod.FileEntry(f["url"], f["suggested_filename"], f["file_type"])
-                   for f in req.files]
-        client = _client(request)
-        own = client is None
-        if own:
-            client = httpx.AsyncClient(timeout=30, follow_redirects=True)
         try:
-            results = await downloader.download_files(entries, Path(run_dir), client, on_event)
-        finally:
+            entries = [parser_mod.FileEntry(f["url"], f["suggested_filename"], f["file_type"])
+                       for f in req.files]
+            client = _client(request)
+            own = client is None
             if own:
-                await client.aclose()
-        for r in results:
-            job["files"][r.source_url].update(status=r.status, bytes=r.bytes, error=r.error)
-        store.write_manifest(Path(run_dir), results)
-        job["status"] = "done"
+                client = httpx.AsyncClient(timeout=30, follow_redirects=True)
+            try:
+                results = await downloader.download_files(entries, Path(run_dir), client, on_event)
+            finally:
+                if own:
+                    await client.aclose()
+            for r in results:
+                job["files"][r.source_url].update(status=r.status, bytes=r.bytes, error=r.error)
+            store.write_manifest(Path(run_dir), results)
+            job["status"] = "done"
+        except BaseException as exc:  # 含取消；僵尸任务会永久 409 锁死
+            job["status"] = "failed"
+            job["error"] = str(exc) or repr(exc)
 
     job["task"] = asyncio.create_task(run_job())
     return {"job_id": job_id}
 
 
 @app.get("/api/jobs/{job_id}")
-def api_job_status(job_id: str):
+def api_job_status(job_id: str):  # sync def → threadpool：与事件循环跨线程读 JOBS，靠 GIL + 外层 files 字典不再增删键保证安全
     job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(404, "任务不存在（服务可能已重启）")
